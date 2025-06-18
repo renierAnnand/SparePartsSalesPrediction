@@ -495,83 +495,252 @@ def create_forecast_charts(result_df, forecast_year, adjustment_percentage):
 
 
 def create_excel_export(result_df, item_forecasts, forecast_year, adjustment_percentage):
-    """Create comprehensive Excel export with multiple sheets"""
+    """Create comprehensive Excel export with separate sheets for each item"""
     
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         
-        # Sheet 1: Total Forecasts Summary
+        # Sheet 1: Executive Summary
+        summary_data = []
+        
+        # Total forecast summary
+        if 'Weighted_Ensemble' in result_df.columns:
+            total_annual = result_df['Weighted_Ensemble'].sum()
+            summary_data.append(['TOTAL COMPANY FORECAST', f"{total_annual:,.0f}", 'Weighted Ensemble'])
+        elif len(result_df.columns) > 1:
+            first_forecast_col = [col for col in result_df.columns if col != 'Month'][0]
+            total_annual = result_df[first_forecast_col].sum()
+            summary_data.append(['TOTAL COMPANY FORECAST', f"{total_annual:,.0f}", first_forecast_col.replace('_Forecast', '')])
+        
+        # Item summary
+        if item_forecasts:
+            summary_data.append(['', '', ''])  # Empty row
+            summary_data.append(['ITEM BREAKDOWN', 'ANNUAL FORECAST', '% OF TOTAL'])
+            
+            total_items_forecast = sum(np.sum(forecast) for forecast in item_forecasts.values())
+            
+            # Sort items by forecast value
+            sorted_items = sorted(item_forecasts.items(), key=lambda x: np.sum(x[1]), reverse=True)
+            
+            for item_name, forecast_values in sorted_items:
+                item_annual = np.sum(forecast_values)
+                percentage = (item_annual / total_items_forecast * 100) if total_items_forecast > 0 else 0
+                summary_data.append([item_name, f"{item_annual:,.0f}", f"{percentage:.1f}%"])
+            
+            summary_data.append(['', '', ''])  # Empty row
+            summary_data.append(['TOTAL ITEMS', f"{total_items_forecast:,.0f}", '100.0%'])
+        
+        # Create summary dataframe
+        exec_summary_df = pd.DataFrame(summary_data, columns=['Description', 'Value', 'Notes'])
+        exec_summary_df.to_excel(writer, sheet_name='Executive Summary', index=False)
+        
+        # Sheet 2: Total Company Forecasts (All Models)
         summary_df = result_df.copy()
         summary_df['Month'] = summary_df['Month'].dt.strftime('%Y-%m')
-        summary_df.to_excel(writer, sheet_name='Total Forecasts', index=False)
         
-        # Sheet 2: Monthly Summary with preferred model
+        # Add quarterly and annual totals
+        quarterly_data = []
+        for col in summary_df.columns:
+            if col != 'Month':
+                values = result_df[col].values
+                quarterly_data.append({
+                    'Model': col.replace('_Forecast', '').replace('_', ' '),
+                    'Q1': f"{np.sum(values[:3]):,.0f}",
+                    'Q2': f"{np.sum(values[3:6]):,.0f}",
+                    'Q3': f"{np.sum(values[6:9]):,.0f}",
+                    'Q4': f"{np.sum(values[9:12]):,.0f}",
+                    'Annual Total': f"{np.sum(values):,.0f}",
+                    'Monthly Avg': f"{np.mean(values):,.0f}"
+                })
+        
+        # Write monthly data first
+        summary_df.to_excel(writer, sheet_name='Total Forecasts', index=False, startrow=0)
+        
+        # Write quarterly summary below
+        if quarterly_data:
+            quarterly_df = pd.DataFrame(quarterly_data)
+            quarterly_df.to_excel(writer, sheet_name='Total Forecasts', index=False, startrow=len(summary_df) + 3)
+        
+        # Sheet 3: Recommended Forecast (Clean single column)
         monthly_summary = result_df[['Month']].copy()
         monthly_summary['Month'] = monthly_summary['Month'].dt.strftime('%Y-%m')
         
-        # Use Weighted Ensemble if available, otherwise use first model
+        # Use best available model
         if 'Weighted_Ensemble' in result_df.columns:
-            monthly_summary['Recommended_Forecast'] = result_df['Weighted_Ensemble']
-            monthly_summary['Model_Used'] = 'Weighted Ensemble'
+            monthly_summary['Forecast'] = result_df['Weighted_Ensemble'].round(0).astype(int)
+            model_used = 'Weighted Ensemble'
         else:
-            # Use first available forecast model
             forecast_cols = [col for col in result_df.columns if '_Forecast' in col]
             if forecast_cols:
-                monthly_summary['Recommended_Forecast'] = result_df[forecast_cols[0]]
-                monthly_summary['Model_Used'] = forecast_cols[0].replace('_Forecast', '')
+                monthly_summary['Forecast'] = result_df[forecast_cols[0]].round(0).astype(int)
+                model_used = forecast_cols[0].replace('_Forecast', '')
         
-        monthly_summary['Adjustment_Applied'] = f"{adjustment_percentage:+.1f}%"
-        monthly_summary.to_excel(writer, sheet_name='Recommended Forecast', index=False)
-        
-        # Sheet 3: Item-level forecasts (if available)
-        if item_forecasts:
-            item_forecast_df = pd.DataFrame()
+        # Add summary statistics
+        if 'Forecast' in monthly_summary.columns:
+            monthly_summary['Cumulative'] = monthly_summary['Forecast'].cumsum()
             
+            # Add metadata at the top
+            metadata_rows = [
+                ['Forecast Year:', forecast_year],
+                ['Model Used:', model_used],
+                ['Adjustment Applied:', f"{adjustment_percentage:+.1f}%"],
+                ['Generated:', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
+                ['Annual Total:', f"{monthly_summary['Forecast'].sum():,.0f}"],
+                ['', ''],  # Empty row
+            ]
+            
+            metadata_df = pd.DataFrame(metadata_rows, columns=['Parameter', 'Value'])
+            metadata_df.to_excel(writer, sheet_name='Recommended Forecast', index=False, startrow=0)
+            
+            # Write forecast data below metadata
+            monthly_summary.to_excel(writer, sheet_name='Recommended Forecast', index=False, startrow=len(metadata_rows) + 1)
+        
+        # Create separate sheet for each item
+        if item_forecasts:
             forecast_dates = pd.date_range(
                 start=f"{forecast_year}-01-01",
                 end=f"{forecast_year}-12-01",
                 freq='MS'
             )
             
-            item_forecast_df['Month'] = forecast_dates.strftime('%Y-%m')
+            # Sort items by annual forecast for consistent ordering
+            sorted_items = sorted(item_forecasts.items(), key=lambda x: np.sum(x[1]), reverse=True)
             
-            for item_name, forecast_values in item_forecasts.items():
+            for item_name, forecast_values in sorted_items:
                 if len(forecast_values) == 12:
-                    item_forecast_df[f'{item_name}_Forecast'] = forecast_values
+                    # Create detailed sheet for this item
+                    item_df = pd.DataFrame({
+                        'Month': forecast_dates.strftime('%Y-%m'),
+                        'Month_Name': forecast_dates.strftime('%B'),
+                        'Forecast': np.round(forecast_values, 0).astype(int),
+                        'Cumulative': np.round(np.cumsum(forecast_values), 0).astype(int)
+                    })
+                    
+                    # Calculate additional metrics
+                    annual_total = np.sum(forecast_values)
+                    monthly_avg = annual_total / 12
+                    peak_month = forecast_dates[np.argmax(forecast_values)].strftime('%B')
+                    peak_value = np.max(forecast_values)
+                    low_month = forecast_dates[np.argmin(forecast_values)].strftime('%B')
+                    low_value = np.min(forecast_values)
+                    
+                    # Add quarterly totals
+                    q1_total = np.sum(forecast_values[:3])
+                    q2_total = np.sum(forecast_values[3:6])
+                    q3_total = np.sum(forecast_values[6:9])
+                    q4_total = np.sum(forecast_values[9:12])
+                    
+                    # Create summary section
+                    item_summary = [
+                        ['ITEM FORECAST SUMMARY', ''],
+                        ['Item Name:', item_name],
+                        ['Forecast Year:', forecast_year],
+                        ['Adjustment Applied:', f"{adjustment_percentage:+.1f}%"],
+                        ['Generated:', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
+                        ['', ''],
+                        ['ANNUAL METRICS', ''],
+                        ['Annual Total:', f"{annual_total:,.0f}"],
+                        ['Monthly Average:', f"{monthly_avg:,.0f}"],
+                        ['Peak Month:', f"{peak_month} ({peak_value:,.0f})"],
+                        ['Lowest Month:', f"{low_month} ({low_value:,.0f})"],
+                        ['', ''],
+                        ['QUARTERLY BREAKDOWN', ''],
+                        ['Q1 Total (Jan-Mar):', f"{q1_total:,.0f}"],
+                        ['Q2 Total (Apr-Jun):', f"{q2_total:,.0f}"],
+                        ['Q3 Total (Jul-Sep):', f"{q3_total:,.0f}"],
+                        ['Q4 Total (Oct-Dec):', f"{q4_total:,.0f}"],
+                        ['', ''],
+                        ['MONTHLY FORECAST DETAIL', '']
+                    ]
+                    
+                    item_summary_df = pd.DataFrame(item_summary, columns=['Metric', 'Value'])
+                    
+                    # Clean sheet name (Excel sheet names have limitations)
+                    clean_item_name = item_name.replace('/', '_').replace('\\', '_').replace('?', '').replace('*', '').replace('[', '').replace(']', '')[:31]
+                    
+                    # Write summary first, then detailed data
+                    item_summary_df.to_excel(writer, sheet_name=clean_item_name, index=False, startrow=0)
+                    item_df.to_excel(writer, sheet_name=clean_item_name, index=False, startrow=len(item_summary) + 2)
             
-            item_forecast_df.to_excel(writer, sheet_name='Item Level Forecasts', index=False)
+            # All Items Comparison Sheet
+            all_items_df = pd.DataFrame()
+            all_items_df['Month'] = forecast_dates.strftime('%Y-%m')
             
-            # Sheet 4: Item totals
-            item_totals = []
-            for item_name, forecast_values in item_forecasts.items():
+            # Add each item as a column
+            for item_name, forecast_values in sorted_items:
                 if len(forecast_values) == 12:
-                    total_forecast = np.sum(forecast_values)
-                    item_totals.append({
+                    clean_name = item_name.replace('/', '_').replace('\\', '_')[:20]  # Shorter for column names
+                    all_items_df[clean_name] = np.round(forecast_values, 0).astype(int)
+            
+            # Add total column
+            if len(all_items_df.columns) > 1:
+                numeric_cols = [col for col in all_items_df.columns if col != 'Month']
+                all_items_df['TOTAL'] = all_items_df[numeric_cols].sum(axis=1)
+            
+            all_items_df.to_excel(writer, sheet_name='All Items Comparison', index=False)
+            
+            # Items Summary Sheet
+            items_summary = []
+            for item_name, forecast_values in sorted_items:
+                if len(forecast_values) == 12:
+                    annual_total = np.sum(forecast_values)
+                    monthly_avg = annual_total / 12
+                    total_items_value = sum(np.sum(f) for f in item_forecasts.values())
+                    percentage = (annual_total / total_items_value * 100) if total_items_value > 0 else 0
+                    
+                    items_summary.append({
+                        'Rank': len(items_summary) + 1,
                         'Item': item_name,
-                        'Total_Annual_Forecast': total_forecast,
-                        'Average_Monthly_Forecast': total_forecast / 12,
-                        'Adjustment_Applied': f"{adjustment_percentage:+.1f}%"
+                        'Annual Forecast': f"{annual_total:,.0f}",
+                        'Monthly Average': f"{monthly_avg:,.0f}",
+                        'Percentage of Total': f"{percentage:.1f}%",
+                        'Q1': f"{np.sum(forecast_values[:3]):,.0f}",
+                        'Q2': f"{np.sum(forecast_values[3:6]):,.0f}",
+                        'Q3': f"{np.sum(forecast_values[6:9]):,.0f}",
+                        'Q4': f"{np.sum(forecast_values[9:12]):,.0f}",
+                        'Peak Month Value': f"{np.max(forecast_values):,.0f}",
+                        'Low Month Value': f"{np.min(forecast_values):,.0f}"
                     })
             
-            if item_totals:
-                item_totals_df = pd.DataFrame(item_totals)
-                item_totals_df = item_totals_df.sort_values('Total_Annual_Forecast', ascending=False)
-                item_totals_df.to_excel(writer, sheet_name='Item Totals', index=False)
+            if items_summary:
+                items_summary_df = pd.DataFrame(items_summary)
+                items_summary_df.to_excel(writer, sheet_name='Items Summary', index=False)
         
-        # Sheet 5: Metadata
+        # Final sheet: Technical Metadata
         metadata = {
-            'Forecast_Year': [forecast_year],
-            'Generated_Date': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
-            'Adjustment_Percentage': [f"{adjustment_percentage:+.1f}%"],
-            'Adjustment_Factor': [f"{(100 + adjustment_percentage) / 100:.3f}"],
-            'Total_Items_Forecasted': [len(item_forecasts) if item_forecasts else 0],
-            'Models_Used': [', '.join([col.replace('_Forecast', '') for col in result_df.columns if '_Forecast' in col])],
-            'Ensemble_Available': ['Yes' if 'Weighted_Ensemble' in result_df.columns else 'No']
+            'Parameter': [
+                'Forecast Year',
+                'Generated Date',
+                'Generated Time',
+                'Adjustment Percentage',
+                'Adjustment Factor',
+                'Total Items Forecasted',
+                'Models Available',
+                'Recommended Model',
+                'Ensemble Available',
+                'Excel Sheets Created',
+                'Total Company Annual Forecast',
+                'Total Items Annual Forecast'
+            ],
+            'Value': [
+                forecast_year,
+                datetime.now().strftime('%Y-%m-%d'),
+                datetime.now().strftime('%H:%M:%S'),
+                f"{adjustment_percentage:+.1f}%",
+                f"{(100 + adjustment_percentage) / 100:.3f}",
+                len(item_forecasts) if item_forecasts else 0,
+                ', '.join([col.replace('_Forecast', '') for col in result_df.columns if '_Forecast' in col]),
+                'Weighted Ensemble' if 'Weighted_Ensemble' in result_df.columns else 'First Available Model',
+                'Yes' if 'Weighted_Ensemble' in result_df.columns else 'No',
+                3 + len(item_forecasts) if item_forecasts else 3,
+                f"{result_df['Weighted_Ensemble'].sum():,.0f}" if 'Weighted_Ensemble' in result_df.columns else 'N/A',
+                f"{sum(np.sum(f) for f in item_forecasts.values()):,.0f}" if item_forecasts else 'N/A'
+            ]
         }
         
         metadata_df = pd.DataFrame(metadata)
-        metadata_df.to_excel(writer, sheet_name='Metadata', index=False)
+        metadata_df.to_excel(writer, sheet_name='Technical Details', index=False)
     
     output.seek(0)
     return output
@@ -848,6 +1017,15 @@ def main():
         # Download options
         st.subheader("📊 Download Forecasts")
         
+        # Show what will be included in Excel export
+        if item_forecasts:
+            st.info(f"📊 **Excel Report will include:**\n"
+                   f"• Executive Summary with company totals\n"
+                   f"• **Separate detailed sheet for each of {len(item_forecasts)} items**\n"
+                   f"• All items comparison sheet\n"
+                   f"• Items ranking summary\n"
+                   f"• Total company forecasts (all models)")
+        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -855,11 +1033,14 @@ def main():
             excel_data = create_excel_export(result_df, item_forecasts, forecast_year, adjustment_percentage)
             adj_text = f"adj_{adjustment_percentage:+.1f}pct" if adjustment_percentage != 0 else "no_adj"
             
+            sheets_count = 5 + len(item_forecasts) if item_forecasts else 3
+            
             st.download_button(
-                label="📊 Download Complete Excel Report",
+                label=f"📊 Download Complete Excel Report ({sheets_count} sheets)",
                 data=excel_data,
                 file_name=f"sales_forecast_{forecast_year}_{adj_text}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help=f"Includes individual sheets for each of {len(item_forecasts)} items" if item_forecasts else "Complete forecast report"
             )
         
         with col2:
@@ -871,6 +1052,20 @@ def main():
                 file_name=f"total_forecasts_{forecast_year}_{adj_text}.csv",
                 mime="text/csv"
             )
+        
+        # Show Excel structure
+        if item_forecasts:
+            with st.expander("📋 Excel Report Structure"):
+                st.write("**Sheet 1: Executive Summary** - Company totals and item breakdown")
+                st.write("**Sheet 2: Total Forecasts** - All AI models with quarterly summaries")
+                st.write("**Sheet 3: Recommended Forecast** - Best model with metadata")
+                st.write("**Individual Item Sheets:**")
+                for idx, item_name in enumerate(sorted(item_forecasts.keys(), key=lambda x: np.sum(item_forecasts[x]), reverse=True), 1):
+                    annual_forecast = np.sum(item_forecasts[item_name])
+                    st.write(f"  • **{item_name}** - Detailed monthly forecast ({annual_forecast:,.0f} annual)")
+                st.write("**All Items Comparison** - Side-by-side monthly comparison")
+                st.write("**Items Summary** - Ranked performance table")
+                st.write("**Technical Details** - Generation metadata")
 
         # Summary metrics
         st.subheader("🎯 Forecast Summary")
