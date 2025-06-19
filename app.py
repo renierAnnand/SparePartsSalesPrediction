@@ -1502,11 +1502,11 @@ def main():
         
         # Show processing mode info
         if processing_mode == "Fast (Simplified)":
-            st.info("⚡ **Fast Mode**: Using simplified methods for maximum speed")
+            st.info("⚡ **Fast Mode**: Using simplified methods for maximum speed (Limited ensemble creation)")
         elif processing_mode == "Balanced (Recommended)":
-            st.info("⚖️ **Balanced Mode**: Smart model selection for optimal speed vs accuracy")
+            st.info("⚖️ **Balanced Mode**: Smart model selection with weighted ensemble creation")
         else:
-            st.info("🔬 **Comprehensive Mode**: Using all advanced models (slower but most accurate)")
+            st.info("🔬 **Comprehensive Mode**: Using all advanced models with weighted ensemble optimization")
         
         # Determine parts to process
         parts_list = spare_parts_df['Part'].unique()
@@ -1924,7 +1924,13 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
-            st.success(f"✅ Excel file ready for download: {filename}")
+                            st.success(f"✅ Excel file ready for download with Weighted Ensemble: {filename}")
+                
+                # Show ensemble creation summary
+                if model_details:
+                    ensemble_created = sum(1 for d in model_details.values() if d.get('ensemble_created', False))
+                    if ensemble_created > 0:
+                        st.info(f"🎯 **Weighted Ensemble created for {ensemble_created} parts** - Check the 'Weighted Ensemble' sheet for optimized predictions!")
             
             # Show file contents info
             with st.expander("📋 Excel File Contents"):
