@@ -156,66 +156,106 @@ def preprocess_spare_parts_data(df):
     processed_parts = []
     unique_parts = df_agg['Part'].unique()
     
-    for part in unique_parts:
+    st.info(f"🔧 Processing {len(unique_parts)} unique parts...")
+    
+    for i, part in enumerate(unique_parts):
+        if i % 1000 == 0:  # Progress update every 1000 parts
+            st.info(f"📊 Processed {i}/{len(unique_parts)} parts...")
+            
         part_data = df_agg[df_agg['Part'] == part].copy()
         
-        if len(part_data) < 3:
+        if len(part_data) < 2:
             # Keep parts with minimal data as-is
+            part_data['log_transformed'] = False
             processed_parts.append(part_data)
             continue
         
-        # 1. Outlier Detection and Treatment using IQR
-        Q1 = part_data['Sales'].quantile(0.25)
-        Q3 = part_data['Sales'].quantile(0.75)
-        IQR = Q3 - Q1
-        
-        if IQR > 0:
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
+        try:
+            # 1. Outlier Detection and Treatment using IQR
+            if len(part_data) >= 4:  # Need at least 4 points for meaningful IQR
+                Q1 = part_data['Sales'].quantile(0.25)
+                Q3 = part_data['Sales'].quantile(0.75)
+                IQR = Q3 - Q1
+                
+                if IQR > 0:
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    
+                    # Cap outliers instead of removing (preserves data points)
+                    outliers_detected = ((part_data['Sales'] < lower_bound) | (part_data['Sales'] > upper_bound)).sum()
+                    if outliers_detected > 0:
+                        part_data['Sales'] = part_data['Sales'].clip(lower=max(0, lower_bound), upper=upper_bound)
             
-            # Cap outliers instead of removing (preserves data points)
-            outliers_detected = ((part_data['Sales'] < lower_bound) | (part_data['Sales'] > upper_bound)).sum()
-            if outliers_detected > 0:
-                part_data['Sales'] = part_data['Sales'].clip(lower=max(0, lower_bound), upper=upper_bound)
-        
-        # 2. Handle missing months with interpolation
-        if len(part_data) > 2:
-            # Create complete month range
-            date_range = pd.date_range(
-                start=part_data['Month'].min(),
-                end=part_data['Month'].max(),
-                freq='MS'
-            )
+            # 2. Handle missing months with interpolation
+            if len(part_data) > 2:
+                # Create complete month range
+                date_range = pd.date_range(
+                    start=part_data['Month'].min(),
+                    end=part_data['Month'].max(),
+                    freq='MS'
+                )
+                
+                # Only fill gaps if reasonable (not more than 3x original data points)
+                if len(date_range) <= len(part_data) * 3:
+                    # Create complete dataframe
+                    complete_df = pd.DataFrame({'Month': date_range})
+                    complete_df['Part'] = part
+                    
+                    # Merge with actual data
+                    part_data = complete_df.merge(part_data, on=['Part', 'Month'], how='left')
+                    
+                    # Try time-based interpolation, fallback to linear if it fails
+                    try:
+                        # Set Month as index for time-based interpolation
+                        part_data_indexed = part_data.set_index('Month')
+                        
+                        # Interpolate missing values using time method
+                        part_data_indexed['Sales'] = part_data_indexed['Sales'].interpolate(method='time', limit_direction='both')
+                        part_data_indexed['Sales'] = part_data_indexed['Sales'].fillna(0)  # Fill any remaining NAs with 0
+                        
+                        # Update Sales_Original for new rows
+                        part_data_indexed['Sales_Original'] = part_data_indexed['Sales_Original'].fillna(part_data_indexed['Sales'])
+                        
+                        # Reset index to get Month back as column
+                        part_data = part_data_indexed.reset_index()
+                        
+                    except Exception:
+                        # Fallback to linear interpolation if time interpolation fails
+                        part_data['Sales'] = part_data['Sales'].interpolate(method='linear', limit_direction='both')
+                        part_data['Sales'] = part_data['Sales'].ffill().bfill().fillna(0)
+                        
+                        # Update Sales_Original for new rows
+                        part_data['Sales_Original'] = part_data['Sales_Original'].fillna(part_data['Sales'])
             
-            # Create complete dataframe
-            complete_df = pd.DataFrame({'Month': date_range})
-            complete_df['Part'] = part
-            
-            # Merge with actual data
-            part_data = complete_df.merge(part_data, on=['Part', 'Month'], how='left')
-            
-            # Interpolate missing values
-            part_data['Sales'] = part_data['Sales'].interpolate(method='time', limit_direction='both')
-            part_data['Sales'] = part_data['Sales'].fillna(0)  # Fill any remaining NAs with 0
-            
-            # Update Sales_Original for new rows
-            part_data['Sales_Original'] = part_data['Sales_Original'].fillna(part_data['Sales'])
-        
-        # 3. Data transformation - test for optimal transformation
-        if part_data['Sales'].std() > 0:
-            skewness = stats.skew(part_data['Sales'].dropna())
-            if abs(skewness) > 1.5 and part_data['Sales'].min() >= 0:  # Highly skewed data
-                part_data['Sales'] = np.log1p(part_data['Sales'])  # log1p handles zeros better
-                part_data['log_transformed'] = True
+            # 3. Data transformation - test for optimal transformation
+            if len(part_data) >= 3 and part_data['Sales'].std() > 0:
+                try:
+                    sales_values = part_data['Sales'].dropna()
+                    if len(sales_values) > 0 and sales_values.min() >= 0:
+                        skewness = stats.skew(sales_values)
+                        if abs(skewness) > 1.5:  # Highly skewed data
+                            part_data['Sales'] = np.log1p(part_data['Sales'])  # log1p handles zeros better
+                            part_data['log_transformed'] = True
+                        else:
+                            part_data['log_transformed'] = False
+                    else:
+                        part_data['log_transformed'] = False
+                except Exception:
+                    part_data['log_transformed'] = False
             else:
                 part_data['log_transformed'] = False
-        else:
+            
+            processed_parts.append(part_data)
+            
+        except Exception as e:
+            # If any preprocessing fails for this part, keep original data
             part_data['log_transformed'] = False
-        
-        processed_parts.append(part_data)
+            processed_parts.append(part_data)
     
     # Combine all processed parts
     final_df = pd.concat(processed_parts, ignore_index=True)
+    
+    st.success(f"✅ Completed preprocessing for {len(unique_parts)} parts")
     
     return final_df
 
