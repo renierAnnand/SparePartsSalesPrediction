@@ -1924,13 +1924,13 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
-                            st.success(f"✅ Excel file ready for download with Weighted Ensemble: {filename}")
+                            st.success("✅ Excel file ready for download with Weighted Ensemble: " + filename)
                 
                 # Show ensemble creation summary
                 if model_details:
                     ensemble_created = sum(1 for d in model_details.values() if d.get('ensemble_created', False))
                     if ensemble_created > 0:
-                        st.info(f"🎯 **Weighted Ensemble created for {ensemble_created} parts** - Check the 'Weighted Ensemble' sheet for optimized predictions!")
+                        st.info("🎯 **Weighted Ensemble created for " + str(ensemble_created) + " parts** - Check the 'Weighted Ensemble' sheet for optimized predictions!")
             
             # Show file contents info
             with st.expander("📋 Excel File Contents"):
