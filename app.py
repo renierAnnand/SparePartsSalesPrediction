@@ -889,7 +889,7 @@ def forecast_single_part(part_data, forecast_periods=12, adjustment_factor=1.0, 
     return optimized_forecast_single_part(part_data, forecast_periods, adjustment_factor, "Balanced", use_models)
 
 def generate_forecast_excel(forecast_results, start_date, model_details=None):
-    """Generate Excel file with forecast results and model details."""
+    """Generate Excel file with forecast results and individual model predictions."""
     try:
         # Create month headers
         month_headers = []
@@ -899,43 +899,72 @@ def generate_forecast_excel(forecast_results, start_date, model_details=None):
             month_headers.append(current_date.strftime('%b-%Y'))
             current_date = current_date + pd.DateOffset(months=1)
         
-        # Create output DataFrame
-        output_data = []
+        # Collect all models used across all parts
+        all_models = set()
+        individual_model_data = {}
+        
+        # Main forecast data (best/ensemble predictions)
+        main_output_data = []
         
         for part_name, forecast_values in forecast_results.items():
             if isinstance(forecast_values, dict):
-                # If multiple models, use ensemble or best model
+                # Store individual model predictions
+                for model_name, model_forecast in forecast_values.items():
+                    if model_name not in individual_model_data:
+                        individual_model_data[model_name] = []
+                    
+                    # Ensure we have exactly 12 values
+                    if len(model_forecast) != 12:
+                        model_forecast = np.resize(model_forecast, 12)
+                    
+                    row_data = [part_name] + model_forecast.tolist()
+                    individual_model_data[model_name].append(row_data)
+                    all_models.add(model_name)
+                
+                # For main sheet, use ensemble or best model
                 if 'Ensemble' in forecast_values:
-                    values = forecast_values['Ensemble']
+                    main_values = forecast_values['Ensemble']
                 else:
                     # Use first available model
-                    values = next(iter(forecast_values.values()))
+                    main_values = next(iter(forecast_values.values()))
             else:
-                values = forecast_values
+                main_values = forecast_values
             
-            # Ensure we have exactly 12 values
-            if len(values) != 12:
-                values = np.resize(values, 12)
+            # Ensure we have exactly 12 values for main sheet
+            if len(main_values) != 12:
+                main_values = np.resize(main_values, 12)
             
-            row_data = [part_name] + values.tolist()
-            output_data.append(row_data)
+            main_row_data = [part_name] + main_values.tolist()
+            main_output_data.append(main_row_data)
         
-        # Create DataFrame
+        # Create main DataFrame
         columns = ['Spare Part'] + month_headers
-        output_df = pd.DataFrame(output_data, columns=columns)
+        main_df = pd.DataFrame(main_output_data, columns=columns)
         
         # Sort by spare part name
-        output_df = output_df.sort_values('Spare Part').reset_index(drop=True)
+        main_df = main_df.sort_values('Spare Part').reset_index(drop=True)
         
         # Round forecast values to integers
         for col in month_headers:
-            output_df[col] = output_df[col].round(0).astype(int)
+            main_df[col] = main_df[col].round(0).astype(int)
         
-        return output_df
+        # Create individual model DataFrames
+        model_dfs = {}
+        for model_name, model_data in individual_model_data.items():
+            model_df = pd.DataFrame(model_data, columns=columns)
+            model_df = model_df.sort_values('Spare Part').reset_index(drop=True)
+            
+            # Round forecast values to integers
+            for col in month_headers:
+                model_df[col] = model_df[col].round(0).astype(int)
+            
+            model_dfs[model_name] = model_df
+        
+        return main_df, model_dfs, list(all_models)
         
     except Exception as e:
         st.error(f"❌ Error generating Excel output: {str(e)}")
-        return None
+        return None, None, None
 
 def create_summary_charts(forecast_results, start_date):
     """Create summary charts for the forecasting results."""
@@ -1309,10 +1338,19 @@ def main():
                         use_models=use_models
                     )
                     
-                    if enable_ensemble and len(all_forecasts) > 1:
-                        forecast_results[part] = all_forecasts
+                    # Always store individual forecasts if multiple models were used
+                    if len(all_forecasts) > 1:
+                        # Create ensemble if enabled
+                        if enable_ensemble:
+                            try:
+                                ensemble_forecast, weights = create_weighted_ensemble(all_forecasts, scores)
+                                all_forecasts['Ensemble'] = ensemble_forecast
+                            except Exception:
+                                pass
+                        
+                        forecast_results[part] = all_forecasts  # Store all individual models (+ ensemble if created)
                     else:
-                        forecast_results[part] = best_forecast
+                        forecast_results[part] = best_forecast  # Store single forecast
                     
                     model_details[part] = {
                         'models_used': list(all_forecasts.keys()),
@@ -1366,39 +1404,55 @@ def main():
         # Generate Excel output
         st.subheader("📊 Forecast Results")
         
-        output_df = generate_forecast_excel(forecast_results, forecast_start_date, model_details)
+        output_result = generate_forecast_excel(forecast_results, forecast_start_date, model_details)
         
-        if output_df is not None:
-            # Show preview
-            st.markdown("**Preview of forecast results:**")
-            st.dataframe(output_df.head(10), use_container_width=True)
+        if output_result[0] is not None:
+            main_df, model_dfs, all_models = output_result
             
-            if len(output_df) > 10:
-                st.info(f"Showing first 10 parts. Total: {len(output_df)} parts in full export.")
+            # Show preview of main results
+            st.markdown("**Preview of main forecast results (Best/Ensemble predictions):**")
+            st.dataframe(main_df.head(10), use_container_width=True)
             
-            # Calculate summary statistics
+            if len(main_df) > 10:
+                st.info(f"Showing first 10 parts. Total: {len(main_df)} parts in full export.")
+            
+            # Show available individual model sheets
+            if model_dfs:
+                st.markdown("**Individual model predictions available:**")
+                for model_name in sorted(all_models):
+                    part_count = len(model_dfs[model_name]) if model_name in model_dfs else 0
+                    st.info(f"📊 **{model_name}**: {part_count} parts")
+            
+            # Calculate summary statistics using main predictions
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                total_annual_forecast = output_df.iloc[:, 1:].sum().sum()
+                total_annual_forecast = main_df.iloc[:, 1:].sum().sum()
                 st.metric("📊 Total Annual Forecast", f"{total_annual_forecast:,.0f}")
             
             with col2:
-                avg_monthly_total = output_df.iloc[:, 1:].sum(axis=0).mean()
+                avg_monthly_total = main_df.iloc[:, 1:].sum(axis=0).mean()
                 st.metric("📈 Avg Monthly Total", f"{avg_monthly_total:,.0f}")
             
             with col3:
-                max_month_total = output_df.iloc[:, 1:].sum(axis=0).max()
-                max_month = output_df.columns[1:][output_df.iloc[:, 1:].sum(axis=0).argmax()]
+                max_month_total = main_df.iloc[:, 1:].sum(axis=0).max()
+                max_month = main_df.columns[1:][main_df.iloc[:, 1:].sum(axis=0).argmax()]
                 st.metric("🔝 Peak Month", f"{max_month}")
             
             with col4:
                 st.metric("🔝 Peak Value", f"{max_month_total:,.0f}")
             
-            # Create summary charts
+            # Create summary charts using main predictions
             st.subheader("📊 Forecast Visualization")
             
-            fig1, fig2 = create_summary_charts(forecast_results, forecast_start_date)
+            # Convert main_df back to dictionary format for compatibility with existing chart functions
+            chart_forecast_results = {}
+            for _, row in main_df.iterrows():
+                part_name = row['Spare Part']
+                forecast_values = row.iloc[1:].values  # Get forecast values (exclude part name)
+                chart_forecast_results[part_name] = forecast_values
+            
+            fig1, fig2 = create_summary_charts(chart_forecast_results, forecast_start_date)
             
             if fig1:
                 st.plotly_chart(fig1, use_container_width=True)
@@ -1411,15 +1465,21 @@ def main():
                 st.subheader("🤖 Model Performance Summary")
                 
                 model_usage = {}
+                total_data_points = {}
+                
                 for part_detail in model_details.values():
                     for model in part_detail.get('models_used', []):
                         model_usage[model] = model_usage.get(model, 0) + 1
+                        if model not in total_data_points:
+                            total_data_points[model] = []
+                        total_data_points[model].append(part_detail.get('data_points', 0))
                 
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.markdown("**Model Usage Count:**")
+                    st.markdown("**Model Usage Statistics:**")
                     for model, count in sorted(model_usage.items(), key=lambda x: x[1], reverse=True):
-                        st.text(f"{model}: {count} parts")
+                        avg_data_points = np.mean(total_data_points[model]) if model in total_data_points else 0
+                        st.text(f"{model}: {count} parts (avg {avg_data_points:.1f} data points)")
                 
                 with col2:
                     if len(model_usage) > 1:
@@ -1430,15 +1490,47 @@ def main():
                         )])
                         fig_models.update_layout(title="Model Usage Distribution", height=300)
                         st.plotly_chart(fig_models, use_container_width=True)
+                
+                # Show model comparison if multiple models available
+                if len(all_models) > 1:
+                    st.markdown("**Individual Model Sheet Contents:**")
+                    for model_name in sorted(all_models):
+                        if model_name in model_dfs:
+                            model_total = model_dfs[model_name].iloc[:, 1:].sum().sum()
+                            st.info(f"📊 **{model_name} Sheet**: {len(model_dfs[model_name])} parts, Total Annual: {model_total:,.0f}")
+            
+            # Show sheets that will be created
+            st.subheader("📋 Excel Sheets Preview")
+            sheet_preview = []
+            sheet_preview.append("**Main Forecast** - Best/Ensemble predictions")
+            
+            if model_dfs:
+                for model_name in sorted(all_models):
+                    sheet_preview.append(f"**{model_name}** - Individual {model_name} predictions ({len(model_dfs.get(model_name, []))} parts)")
+            
+            sheet_preview.extend([
+                "**Summary** - Statistics and metadata",
+                "**Model Details** - Processing information per part"
+            ])
+            
+            for sheet_desc in sheet_preview:
+                st.text(f"• {sheet_desc}")
             
             # Download Excel file
             st.subheader("📁 Download Results")
             
-            # Convert to Excel
+            # Convert to Excel with multiple sheets
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                # Main forecast sheet
-                output_df.to_excel(writer, index=False, sheet_name='Spare Parts Forecast')
+                # Main forecast sheet (best/ensemble predictions)
+                main_df.to_excel(writer, index=False, sheet_name='Main Forecast')
+                
+                # Individual model prediction sheets
+                if model_dfs:
+                    for model_name, model_df in model_dfs.items():
+                        # Clean sheet name (Excel has limitations on sheet names)
+                        clean_sheet_name = model_name.replace('_', ' ')[:31]  # Excel limit is 31 characters
+                        model_df.to_excel(writer, index=False, sheet_name=clean_sheet_name)
                 
                 # Summary sheet
                 summary_data = {
@@ -1452,11 +1544,12 @@ def main():
                         'Average Monthly Total',
                         'Peak Month',
                         'Adjustment Applied',
-                        'Models Used',
+                        'Processing Mode',
+                        'Models Available',
                         'Generated On'
                     ],
                     'Value': [
-                        len(output_df),
+                        len(main_df),
                         successful_forecasts,
                         failed_forecasts,
                         f"{success_rate:.1f}%",
@@ -1465,7 +1558,8 @@ def main():
                         f"{avg_monthly_total:,.0f}",
                         max_month,
                         f"{adjustment_percentage:+.1f}%",
-                        ', '.join([model for model, used in use_models.items() if used]),
+                        processing_mode,
+                        ', '.join(sorted(all_models)) if all_models else 'N/A',
                         datetime.now().strftime('%Y-%m-%d %H:%M')
                     ]
                 }
@@ -1481,6 +1575,7 @@ def main():
                             'Models_Used': ', '.join(details.get('models_used', [])),
                             'Data_Points': details.get('data_points', 0),
                             'Best_Score': min(details.get('scores', {}).values()) if details.get('scores') else 'N/A',
+                            'Processing_Mode': details.get('processing_mode', 'N/A'),
                             'Error': details.get('error', '')
                         })
                     
@@ -1491,10 +1586,11 @@ def main():
             
             # Download button
             adj_suffix = f"_adj{adjustment_percentage:+.1f}pct" if adjustment_percentage != 0 else ""
-            filename = f"spare_parts_forecast_{forecast_start_date.strftime('%Y%m')}{adj_suffix}.xlsx"
+            mode_suffix = f"_{processing_mode.split()[0].lower()}"
+            filename = f"spare_parts_forecast_{forecast_start_date.strftime('%Y%m')}{adj_suffix}{mode_suffix}.xlsx"
             
             st.download_button(
-                label="📥 Download Excel Forecast",
+                label="📥 Download Excel Forecast with Individual Models",
                 data=excel_buffer.getvalue(),
                 file_name=filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1504,22 +1600,27 @@ def main():
             
             # Show file contents info
             with st.expander("📋 Excel File Contents"):
-                st.markdown("""
-                **Sheet 1: Spare Parts Forecast**
-                - Column A: Spare Part codes/names
-                - Columns B-M: Monthly forecasts for next 12 months
-                - All values rounded to whole numbers
+                sheet_info = ["**Main Forecast Sheet**", "- Best/Ensemble predictions for each part", "- Column A: Spare Part codes/names", "- Columns B-M: Monthly forecasts for next 12 months", ""]
                 
-                **Sheet 2: Summary**
-                - Key statistics and metadata
-                - Model performance summary
-                - Generation timestamp
+                if model_dfs:
+                    sheet_info.extend(["**Individual Model Sheets:**"])
+                    for model_name in sorted(all_models):
+                        sheet_info.append(f"- **{model_name}**: Individual predictions from this model")
+                    sheet_info.append("")
                 
-                **Sheet 3: Model Details** (if ≤1000 parts)
-                - Which models were used for each part
-                - Data quality metrics per part
-                - Error information if applicable
-                """)
+                sheet_info.extend([
+                    "**Summary Sheet**",
+                    "- Key statistics and metadata",
+                    "- Model performance summary",
+                    "- Generation timestamp",
+                    "",
+                    "**Model Details Sheet** (if ≤1000 parts)",
+                    "- Which models were used for each part",
+                    "- Data quality metrics per part",
+                    "- Processing mode and error information"
+                ])
+                
+                st.markdown("\n".join(sheet_info))
 
 if __name__ == "__main__":
     main()
