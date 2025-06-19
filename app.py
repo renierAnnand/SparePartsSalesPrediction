@@ -923,10 +923,8 @@ def generate_forecast_excel(forecast_results, start_date, model_details=None):
                     row_data = [part_name] + model_forecast.tolist()
                     individual_model_data[model_name].append(row_data)
                 
-                # For main sheet, prioritize weighted ensemble, then best model
-                if 'Weighted_Ensemble' in forecast_values:
-                    main_values = forecast_values['Weighted_Ensemble']
-                elif 'Ensemble' in forecast_values:
+                # For main sheet, prioritize ensemble, then best model
+                if 'Ensemble' in forecast_values:
                     main_values = forecast_values['Ensemble']
                 elif forecast_values:
                     # Use the first available model (they're all stored anyway)
@@ -994,10 +992,8 @@ def create_summary_charts(forecast_results, start_date):
         for part_name, forecast_data in forecast_results.items():
             try:
                 if isinstance(forecast_data, dict):
-                    # If multiple models, prioritize weighted ensemble
-                    if 'Weighted_Ensemble' in forecast_data:
-                        values = forecast_data['Weighted_Ensemble']
-                    elif 'Ensemble' in forecast_data:
+                    # If multiple models, use ensemble or best model
+                    if 'Ensemble' in forecast_data:
                         values = forecast_data['Ensemble']
                     else:
                         values = next(iter(forecast_data.values()))
@@ -1080,9 +1076,7 @@ def create_historical_vs_forecast_chart(spare_parts_df, forecast_results, foreca
         for part_name, forecast_data in forecast_results.items():
             try:
                 if isinstance(forecast_data, dict):
-                    if 'Weighted_Ensemble' in forecast_data:
-                        values = forecast_data['Weighted_Ensemble']
-                    elif 'Ensemble' in forecast_data:
+                    if 'Ensemble' in forecast_data:
                         values = forecast_data['Ensemble']
                     else:
                         values = next(iter(forecast_data.values()))
@@ -1172,9 +1166,7 @@ def create_cumulative_comparison_chart(spare_parts_df, forecast_results, forecas
         for part_name, forecast_data in forecast_results.items():
             try:
                 if isinstance(forecast_data, dict):
-                    if 'Weighted_Ensemble' in forecast_data:
-                        values = forecast_data['Weighted_Ensemble']
-                    elif 'Ensemble' in forecast_data:
+                    if 'Ensemble' in forecast_data:
                         values = forecast_data['Ensemble']
                     else:
                         values = next(iter(forecast_data.values()))
@@ -1502,11 +1494,11 @@ def main():
         
         # Show processing mode info
         if processing_mode == "Fast (Simplified)":
-            st.info("⚡ **Fast Mode**: Using simplified methods for maximum speed (Limited ensemble creation)")
+            st.info("⚡ **Fast Mode**: Using simplified methods for maximum speed")
         elif processing_mode == "Balanced (Recommended)":
-            st.info("⚖️ **Balanced Mode**: Smart model selection with weighted ensemble creation")
+            st.info("⚖️ **Balanced Mode**: Smart model selection for optimal speed vs accuracy")
         else:
-            st.info("🔬 **Comprehensive Mode**: Using all advanced models with weighted ensemble optimization")
+            st.info("🔬 **Comprehensive Mode**: Using all advanced models (slower but most accurate)")
         
         # Determine parts to process
         parts_list = spare_parts_df['Part'].unique()
@@ -1556,25 +1548,18 @@ def main():
                         # Multiple models available - store all individual forecasts
                         stored_forecasts = all_forecasts.copy()
                         
-                        # ALWAYS create weighted ensemble when multiple models exist
-                        try:
-                            ensemble_forecast, weights = create_weighted_ensemble(all_forecasts, scores)
-                            stored_forecasts['Weighted_Ensemble'] = ensemble_forecast
-                            
-                            # Store ensemble metadata for transparency
-                            model_details[part]['ensemble_weights'] = weights
-                            model_details[part]['ensemble_created'] = True
-                            
-                        except Exception as e:
-                            # If ensemble fails, note it but continue
-                            model_details[part]['ensemble_error'] = str(e)
-                            model_details[part]['ensemble_created'] = False
+                        # Add ensemble if enabled
+                        if enable_ensemble:
+                            try:
+                                ensemble_forecast, weights = create_weighted_ensemble(all_forecasts, scores)
+                                stored_forecasts['Ensemble'] = ensemble_forecast
+                            except Exception:
+                                pass
                         
                         forecast_results[part] = stored_forecasts
                     else:
                         # Single model - store as simple forecast
                         forecast_results[part] = best_forecast
-                        model_details[part]['ensemble_created'] = False
                     
                     model_details[part] = {
                         'models_used': list(all_forecasts.keys()),
@@ -1924,13 +1909,7 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
-                            st.success(f"✅ Excel file ready for download with Weighted Ensemble: {filename}")
-                
-                # Show ensemble creation summary
-                if model_details:
-                    ensemble_created = sum(1 for d in model_details.values() if d.get('ensemble_created', False))
-                    if ensemble_created > 0:
-                        st.info(f"🎯 **Weighted Ensemble created for {ensemble_created} parts** - Check the 'Weighted Ensemble' sheet for optimized predictions!")
+            st.success(f"✅ Excel file ready for download: {filename}")
             
             # Show file contents info
             with st.expander("📋 Excel File Contents"):
