@@ -923,8 +923,10 @@ def generate_forecast_excel(forecast_results, start_date, model_details=None):
                     row_data = [part_name] + model_forecast.tolist()
                     individual_model_data[model_name].append(row_data)
                 
-                # For main sheet, prioritize ensemble, then best model
-                if 'Ensemble' in forecast_values:
+                # For main sheet, prioritize weighted ensemble, then best model
+                if 'Weighted_Ensemble' in forecast_values:
+                    main_values = forecast_values['Weighted_Ensemble']
+                elif 'Ensemble' in forecast_values:
                     main_values = forecast_values['Ensemble']
                 elif forecast_values:
                     # Use the first available model (they're all stored anyway)
@@ -992,8 +994,10 @@ def create_summary_charts(forecast_results, start_date):
         for part_name, forecast_data in forecast_results.items():
             try:
                 if isinstance(forecast_data, dict):
-                    # If multiple models, use ensemble or best model
-                    if 'Ensemble' in forecast_data:
+                    # If multiple models, prioritize weighted ensemble
+                    if 'Weighted_Ensemble' in forecast_data:
+                        values = forecast_data['Weighted_Ensemble']
+                    elif 'Ensemble' in forecast_data:
                         values = forecast_data['Ensemble']
                     else:
                         values = next(iter(forecast_data.values()))
@@ -1076,7 +1080,9 @@ def create_historical_vs_forecast_chart(spare_parts_df, forecast_results, foreca
         for part_name, forecast_data in forecast_results.items():
             try:
                 if isinstance(forecast_data, dict):
-                    if 'Ensemble' in forecast_data:
+                    if 'Weighted_Ensemble' in forecast_data:
+                        values = forecast_data['Weighted_Ensemble']
+                    elif 'Ensemble' in forecast_data:
                         values = forecast_data['Ensemble']
                     else:
                         values = next(iter(forecast_data.values()))
@@ -1166,7 +1172,9 @@ def create_cumulative_comparison_chart(spare_parts_df, forecast_results, forecas
         for part_name, forecast_data in forecast_results.items():
             try:
                 if isinstance(forecast_data, dict):
-                    if 'Ensemble' in forecast_data:
+                    if 'Weighted_Ensemble' in forecast_data:
+                        values = forecast_data['Weighted_Ensemble']
+                    elif 'Ensemble' in forecast_data:
                         values = forecast_data['Ensemble']
                     else:
                         values = next(iter(forecast_data.values()))
@@ -1548,18 +1556,25 @@ def main():
                         # Multiple models available - store all individual forecasts
                         stored_forecasts = all_forecasts.copy()
                         
-                        # Add ensemble if enabled
-                        if enable_ensemble:
-                            try:
-                                ensemble_forecast, weights = create_weighted_ensemble(all_forecasts, scores)
-                                stored_forecasts['Ensemble'] = ensemble_forecast
-                            except Exception:
-                                pass
+                        # ALWAYS create weighted ensemble when multiple models exist
+                        try:
+                            ensemble_forecast, weights = create_weighted_ensemble(all_forecasts, scores)
+                            stored_forecasts['Weighted_Ensemble'] = ensemble_forecast
+                            
+                            # Store ensemble metadata for transparency
+                            model_details[part]['ensemble_weights'] = weights
+                            model_details[part]['ensemble_created'] = True
+                            
+                        except Exception as e:
+                            # If ensemble fails, note it but continue
+                            model_details[part]['ensemble_error'] = str(e)
+                            model_details[part]['ensemble_created'] = False
                         
                         forecast_results[part] = stored_forecasts
                     else:
                         # Single model - store as simple forecast
                         forecast_results[part] = best_forecast
+                        model_details[part]['ensemble_created'] = False
                     
                     model_details[part] = {
                         'models_used': list(all_forecasts.keys()),
@@ -1613,10 +1628,11 @@ def main():
         # Generate Excel output
         st.subheader("📊 Forecast Results")
         
-        output_result = generate_forecast_excel(forecast_results, forecast_start_date, model_details)
-        
-        if output_result[0] is not None:
-            main_df, model_dfs, all_models = output_result
+        try:
+            output_result = generate_forecast_excel(forecast_results, forecast_start_date, model_details)
+            
+            if output_result and output_result[0] is not None:
+                main_df, model_dfs, all_models = output_result
             
             # Show preview of main results
             st.markdown("**Preview of main forecast results (Best/Ensemble predictions):**")
@@ -1770,9 +1786,176 @@ def main():
                 
             except Exception as e:
                 st.info("📊 Historical pattern analysis not available - insufficient data")
+                st.write(f"Debug: {str(e)}")
+            
+            # Model performance summary
+            if model_details:
+                st.subheader("🤖 Model Performance Summary")
+                
+                model_usage = {}
+                total_data_points = {}
+                
+                for part_detail in model_details.values():
+                    for model in part_detail.get('models_used', []):
+                        model_usage[model] = model_usage.get(model, 0) + 1
+                        if model not in total_data_points:
+                            total_data_points[model] = []
+                        total_data_points[model].append(part_detail.get('data_points', 0))
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**Model Usage Statistics:**")
+                    for model, count in sorted(model_usage.items(), key=lambda x: x[1], reverse=True):
+                        avg_data_points = np.mean(total_data_points[model]) if model in total_data_points else 0
+                        st.text(f"{model}: {count} parts (avg {avg_data_points:.1f} data points)")
+                
+                with col2:
+                    if len(model_usage) > 1:
+                        fig_models = go.Figure(data=[go.Pie(
+                            labels=list(model_usage.keys()),
+                            values=list(model_usage.values()),
+                            hole=0.3
+                        )])
+                        fig_models.update_layout(title="Model Usage Distribution", height=300)
+                        st.plotly_chart(fig_models, use_container_width=True)
+                
+                # Show model comparison if multiple models available
+                if len(all_models) > 1:
+                    st.markdown("**Individual Model Sheet Contents:**")
+                    for model_name in sorted(all_models):
+                        if model_name in model_dfs:
+                            model_total = model_dfs[model_name].iloc[:, 1:].sum().sum()
+                            st.info(f"📊 **{model_name} Sheet**: {len(model_dfs[model_name])} parts, Total Annual: {model_total:,.0f}")
+            
+            # Show sheets that will be created
+            st.subheader("📋 Excel Sheets Preview")
+            sheet_preview = []
+            sheet_preview.append("**Main Forecast** - Best/Ensemble predictions")
+            
+            if model_dfs:
+                for model_name in sorted(all_models):
+                    sheet_preview.append(f"**{model_name}** - Individual {model_name} predictions ({len(model_dfs.get(model_name, []))} parts)")
+            
+            sheet_preview.extend([
+                "**Summary** - Statistics and metadata",
+                "**Model Details** - Processing information per part"
+            ])
+            
+            for sheet_desc in sheet_preview:
+                st.text(f"• {sheet_desc}")
+            
+            # Download Excel file
+            st.subheader("📁 Download Results")
+            
+            # Convert to Excel with multiple sheets
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                # Main forecast sheet (best/ensemble predictions)
+                main_df.to_excel(writer, index=False, sheet_name='Main Forecast')
+                
+                # Individual model prediction sheets
+                if model_dfs:
+                    for model_name, model_df in model_dfs.items():
+                        # Clean sheet name (Excel has limitations on sheet names)
+                        clean_sheet_name = model_name.replace('_', ' ')[:31]  # Excel limit is 31 characters
+                        model_df.to_excel(writer, index=False, sheet_name=clean_sheet_name)
+                
+                # Summary sheet
+                summary_data = {
+                    'Metric': [
+                        'Total Parts Processed',
+                        'Successful Forecasts',
+                        'Fallback Used',
+                        'Success Rate',
+                        'Forecast Period',
+                        'Total Annual Forecast',
+                        'Average Monthly Total',
+                        'Peak Month',
+                        'Adjustment Applied',
+                        'Processing Mode',
+                        'Models Available',
+                        'Generated On'
+                    ],
+                    'Value': [
+                        len(main_df),
+                        successful_forecasts,
+                        failed_forecasts,
+                        f"{success_rate:.1f}%",
+                        f"{forecast_start_date.strftime('%Y-%m')} to {forecast_end_date.strftime('%Y-%m')}",
+                        f"{total_annual_forecast:,.0f}",
+                        f"{avg_monthly_total:,.0f}",
+                        max_month,
+                        f"{adjustment_percentage:+.1f}%",
+                        processing_mode,
+                        ', '.join(sorted(all_models)) if all_models else 'N/A',
+                        datetime.now().strftime('%Y-%m-%d %H:%M')
+                    ]
+                }
+                summary_df = pd.DataFrame(summary_data)
+                summary_df.to_excel(writer, index=False, sheet_name='Summary')
+                
+                # Model details sheet (if not too large)
+                if len(model_details) <= 1000:  # Limit for performance
+                    model_detail_rows = []
+                    for part, details in model_details.items():
+                        model_detail_rows.append({
+                            'Part': part,
+                            'Models_Used': ', '.join(details.get('models_used', [])),
+                            'Data_Points': details.get('data_points', 0),
+                            'Best_Score': min(details.get('scores', {}).values()) if details.get('scores') else 'N/A',
+                            'Processing_Mode': details.get('processing_mode', 'N/A'),
+                            'Error': details.get('error', '')
+                        })
+                    
+                    model_details_df = pd.DataFrame(model_detail_rows)
+                    model_details_df.to_excel(writer, index=False, sheet_name='Model Details')
+            
+            excel_buffer.seek(0)
+            
+            # Download button
+            adj_suffix = f"_adj{adjustment_percentage:+.1f}pct" if adjustment_percentage != 0 else ""
+            mode_suffix = f"_{processing_mode.split()[0].lower()}"
+            filename = f"spare_parts_forecast_{forecast_start_date.strftime('%Y%m')}{adj_suffix}{mode_suffix}.xlsx"
+            
+            st.download_button(
+                label="📥 Download Excel Forecast with Individual Models",
+                data=excel_buffer.getvalue(),
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
+            st.success(f"✅ Excel file ready for download: {filename}")
+            
+            # Show file contents info
+            with st.expander("📋 Excel File Contents"):
+                sheet_info = ["**Main Forecast Sheet**", "- Best/Ensemble predictions for each part", "- Column A: Spare Part codes/names", "- Columns B-M: Monthly forecasts for next 12 months", ""]
+                
+                if model_dfs:
+                    sheet_info.extend(["**Individual Model Sheets:**"])
+                    for model_name in sorted(all_models):
+                        sheet_info.append(f"- **{model_name}**: Individual predictions from this model")
+                    sheet_info.append("")
+                
+                sheet_info.extend([
+                    "**Summary Sheet**",
+                    "- Key statistics and metadata",
+                    "- Model performance summary",
+                    "- Generation timestamp",
+                    "",
+                    "**Model Details Sheet** (if ≤1000 parts)",
+                    "- Which models were used for each part",
+                    "- Data quality metrics per part",
+                    "- Processing mode and error information"
+                ])
+                
+                st.markdown("\n".join(sheet_info))
+            
+        except Exception as e:
+            st.error(f"❌ Error in results processing: {str(e)}")
+            st.write("Debug info:", str(e))
         
-        else:
-            st.error("❌ Failed to generate forecast results")
+    else:
+        st.error("❌ No forecast results generated")
             
             # Model performance summary
             if model_details:
