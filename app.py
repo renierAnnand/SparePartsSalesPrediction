@@ -985,32 +985,24 @@ def create_summary_charts(forecast_results, start_date):
             month_headers.append(current_date.strftime('%b-%Y'))
             current_date = current_date + pd.DateOffset(months=1)
         
-        # Calculate totals per month - with proper data type handling
+        # Calculate totals per month
         monthly_totals = np.zeros(12)
         part_totals = {}
         
         for part_name, forecast_data in forecast_results.items():
-            try:
-                if isinstance(forecast_data, dict):
-                    # If multiple models, use ensemble or best model
-                    if 'Ensemble' in forecast_data:
-                        values = forecast_data['Ensemble']
-                    else:
-                        values = next(iter(forecast_data.values()))
+            if isinstance(forecast_data, dict):
+                # If multiple models, use ensemble or best model
+                if 'Ensemble' in forecast_data:
+                    values = forecast_data['Ensemble']
                 else:
-                    values = forecast_data
-                
-                # Ensure values is a numpy array of floats
-                values = np.array(values, dtype=float)
-                
-                # Ensure correct length
-                if len(values) == 12:
-                    monthly_totals += values
-                    part_totals[part_name] = float(np.sum(values))
-                    
-            except Exception as e:
-                # Skip problematic parts and continue
-                continue
+                    values = next(iter(forecast_data.values()))
+            else:
+                values = forecast_data
+            
+            # Ensure correct length
+            if len(values) == 12:
+                monthly_totals += values
+                part_totals[part_name] = np.sum(values)
         
         # Create monthly forecast chart
         fig1 = go.Figure()
@@ -1029,26 +1021,23 @@ def create_summary_charts(forecast_results, start_date):
         )
         
         # Create top parts chart (top 20 by total forecast)
-        if part_totals:
-            top_parts = sorted(part_totals.items(), key=lambda x: x[1], reverse=True)[:20]
+        top_parts = sorted(part_totals.items(), key=lambda x: x[1], reverse=True)[:20]
+        
+        if top_parts:
+            fig2 = go.Figure()
+            fig2.add_trace(go.Bar(
+                y=[part[0][:30] + '...' if len(part[0]) > 30 else part[0] for part in top_parts],  # Truncate long names
+                x=[part[1] for part in top_parts],
+                orientation='h',
+                marker_color='lightgreen'
+            ))
             
-            if top_parts:
-                fig2 = go.Figure()
-                fig2.add_trace(go.Bar(
-                    y=[part[0][:30] + '...' if len(part[0]) > 30 else part[0] for part in top_parts],  # Truncate long names
-                    x=[float(part[1]) for part in top_parts],  # Ensure float values
-                    orientation='h',
-                    marker_color='lightgreen'
-                ))
-                
-                fig2.update_layout(
-                    title='🔝 Top 20 Parts by Total Forecast',
-                    xaxis_title='Total Forecast Quantity (12 months)',
-                    yaxis_title='Spare Part',
-                    height=600
-                )
-            else:
-                fig2 = None
+            fig2.update_layout(
+                title='🔝 Top 20 Parts by Total Forecast',
+                xaxis_title='Total Forecast Quantity (12 months)',
+                yaxis_title='Spare Part',
+                height=600
+            )
         else:
             fig2 = None
         
@@ -1057,191 +1046,6 @@ def create_summary_charts(forecast_results, start_date):
     except Exception as e:
         st.error(f"❌ Error creating charts: {str(e)}")
         return None, None
-
-def create_historical_vs_forecast_chart(spare_parts_df, forecast_results, forecast_start_date):
-    """Create a chart showing cumulative historical sales vs forecast."""
-    try:
-        # Calculate monthly historical totals
-        historical_monthly = spare_parts_df.groupby(spare_parts_df['Month'].dt.to_period('M'))['Sales'].sum().reset_index()
-        historical_monthly['Month'] = historical_monthly['Month'].dt.to_timestamp()
-        historical_monthly = historical_monthly.sort_values('Month')
-        
-        # Get last 24 months of historical data for better visualization
-        if len(historical_monthly) > 24:
-            historical_monthly = historical_monthly.tail(24)
-        
-        # Calculate forecast monthly totals
-        forecast_monthly_totals = np.zeros(12)
-        
-        for part_name, forecast_data in forecast_results.items():
-            try:
-                if isinstance(forecast_data, dict):
-                    if 'Ensemble' in forecast_data:
-                        values = forecast_data['Ensemble']
-                    else:
-                        values = next(iter(forecast_data.values()))
-                else:
-                    values = forecast_data
-                
-                values = np.array(values, dtype=float)
-                if len(values) == 12:
-                    forecast_monthly_totals += values
-            except:
-                continue
-        
-        # Create forecast dates
-        forecast_dates = pd.date_range(start=forecast_start_date, periods=12, freq='MS')
-        
-        # Create the comparison chart
-        fig = go.Figure()
-        
-        # Historical data
-        fig.add_trace(go.Scatter(
-            x=historical_monthly['Month'],
-            y=historical_monthly['Sales'],
-            mode='lines+markers',
-            name='Historical Sales',
-            line=dict(color='blue', width=2),
-            marker=dict(size=6)
-        ))
-        
-        # Forecast data
-        fig.add_trace(go.Scatter(
-            x=forecast_dates,
-            y=forecast_monthly_totals,
-            mode='lines+markers',
-            name='Forecast',
-            line=dict(color='red', width=2, dash='dash'),
-            marker=dict(size=6, symbol='diamond')
-        ))
-        
-        # Add vertical line to separate historical from forecast
-        fig.add_vline(
-            x=forecast_start_date,
-            line_dash="dot",
-            line_color="gray",
-            annotation_text="Forecast Start"
-        )
-        
-        fig.update_layout(
-            title='📈 Historical Sales vs AI Forecast Comparison',
-            xaxis_title='Month',
-            yaxis_title='Total Monthly Sales',
-            height=500,
-            hovermode='x unified',
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=0.01
-            )
-        )
-        
-        return fig
-        
-    except Exception as e:
-        st.error(f"❌ Error creating historical vs forecast chart: {str(e)}")
-        return None
-
-def create_cumulative_comparison_chart(spare_parts_df, forecast_results, forecast_start_date):
-    """Create a chart showing cumulative historical sales vs cumulative forecast."""
-    try:
-        # Calculate monthly historical totals
-        historical_monthly = spare_parts_df.groupby(spare_parts_df['Month'].dt.to_period('M'))['Sales'].sum().reset_index()
-        historical_monthly['Month'] = historical_monthly['Month'].dt.to_timestamp()
-        historical_monthly = historical_monthly.sort_values('Month')
-        
-        # Calculate cumulative historical sales
-        historical_monthly['Cumulative_Sales'] = historical_monthly['Sales'].cumsum()
-        
-        # Use last 24 months for better visualization
-        if len(historical_monthly) > 24:
-            historical_monthly = historical_monthly.tail(24)
-            # Recalculate cumulative from the start of the 24-month period
-            historical_monthly['Cumulative_Sales'] = historical_monthly['Sales'].cumsum()
-        
-        # Calculate forecast monthly totals
-        forecast_monthly_totals = np.zeros(12)
-        
-        for part_name, forecast_data in forecast_results.items():
-            try:
-                if isinstance(forecast_data, dict):
-                    if 'Ensemble' in forecast_data:
-                        values = forecast_data['Ensemble']
-                    else:
-                        values = next(iter(forecast_data.values()))
-                else:
-                    values = forecast_data
-                
-                values = np.array(values, dtype=float)
-                if len(values) == 12:
-                    forecast_monthly_totals += values
-            except:
-                continue
-        
-        # Calculate cumulative forecast
-        forecast_cumulative = np.cumsum(forecast_monthly_totals)
-        
-        # Create forecast dates
-        forecast_dates = pd.date_range(start=forecast_start_date, periods=12, freq='MS')
-        
-        # Adjust forecast cumulative to continue from last historical value
-        last_historical_cumulative = historical_monthly['Cumulative_Sales'].iloc[-1] if len(historical_monthly) > 0 else 0
-        forecast_cumulative_adjusted = forecast_cumulative + last_historical_cumulative
-        
-        # Create the comparison chart
-        fig = go.Figure()
-        
-        # Historical cumulative data
-        fig.add_trace(go.Scatter(
-            x=historical_monthly['Month'],
-            y=historical_monthly['Cumulative_Sales'],
-            mode='lines+markers',
-            name='Cumulative Historical Sales',
-            line=dict(color='blue', width=3),
-            marker=dict(size=6),
-            fill='tonexty' if len(historical_monthly) == 0 else None
-        ))
-        
-        # Forecast cumulative data
-        fig.add_trace(go.Scatter(
-            x=forecast_dates,
-            y=forecast_cumulative_adjusted,
-            mode='lines+markers',
-            name='Cumulative Forecast',
-            line=dict(color='red', width=3, dash='dash'),
-            marker=dict(size=8, symbol='diamond'),
-            fill='tonexty'
-        ))
-        
-        # Add vertical line to separate historical from forecast
-        fig.add_vline(
-            x=forecast_start_date,
-            line_dash="dot",
-            line_color="gray",
-            annotation_text="Forecast Start",
-            annotation_position="top"
-        )
-        
-        fig.update_layout(
-            title='📊 Cumulative Historical Sales vs Cumulative AI Forecast',
-            xaxis_title='Month',
-            yaxis_title='Cumulative Total Sales',
-            height=500,
-            hovermode='x unified',
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=0.01
-            )
-        )
-        
-        return fig
-        
-    except Exception as e:
-        st.error(f"❌ Error creating cumulative comparison chart: {str(e)}")
-        return None
 
 def main():
     """Main function for the advanced spare parts forecasting app."""
@@ -1613,11 +1417,10 @@ def main():
         # Generate Excel output
         st.subheader("📊 Forecast Results")
         
-        try:
-            output_result = generate_forecast_excel(forecast_results, forecast_start_date, model_details)
-            
-            if output_result and output_result[0] is not None:
-                main_df, model_dfs, all_models = output_result
+        output_result = generate_forecast_excel(forecast_results, forecast_start_date, model_details)
+        
+        if output_result[0] is not None:
+            main_df, model_dfs, all_models = output_result
             
             # Show preview of main results
             st.markdown("**Preview of main forecast results (Best/Ensemble predictions):**")
@@ -1662,7 +1465,6 @@ def main():
                 forecast_values = row.iloc[1:].values  # Get forecast values (exclude part name)
                 chart_forecast_results[part_name] = forecast_values
             
-            # Create forecast summary charts
             fig1, fig2 = create_summary_charts(chart_forecast_results, forecast_start_date)
             
             if fig1:
@@ -1670,277 +1472,6 @@ def main():
             
             if fig2:
                 st.plotly_chart(fig2, use_container_width=True)
-            
-            # Create historical vs forecast comparison chart
-            st.subheader("📈 Historical vs Forecast Analysis")
-            
-            fig3 = create_historical_vs_forecast_chart(spare_parts_df, chart_forecast_results, forecast_start_date)
-            if fig3:
-                st.plotly_chart(fig3, use_container_width=True)
-            
-            # Create cumulative comparison chart
-            fig4 = create_cumulative_comparison_chart(spare_parts_df, chart_forecast_results, forecast_start_date)
-            if fig4:
-                st.plotly_chart(fig4, use_container_width=True)
-            
-            # Add historical pattern analysis
-            st.subheader("📊 Historical Sales Pattern Analysis")
-            st.markdown("*Comparing real sales data across different years*")
-            
-            try:
-                # Create historical pattern analysis
-                historical_analysis = spare_parts_df.copy()
-                historical_analysis['Year'] = historical_analysis['Month'].dt.year
-                historical_analysis['MonthNum'] = historical_analysis['Month'].dt.month
-                
-                # Get unique years
-                years = sorted(historical_analysis['Year'].unique())
-                
-                if len(years) >= 2:  # Need at least 2 years for comparison
-                    # Group by year and month
-                    yearly_monthly = historical_analysis.groupby(['Year', 'MonthNum'])['Sales'].sum().reset_index()
-                    
-                    fig_historical = go.Figure()
-                    
-                    colors = ['lightblue', 'lightcoral', 'lightgreen', 'lightyellow', 'lightpink']
-                    
-                    for i, year in enumerate(years[-5:]):  # Show last 5 years max
-                        year_data = yearly_monthly[yearly_monthly['Year'] == year]
-                        
-                        # Create month labels
-                        month_labels = []
-                        for month_num in year_data['MonthNum']:
-                            month_labels.append(pd.Timestamp(year=2000, month=month_num, day=1).strftime('%b'))
-                        
-                        fig_historical.add_trace(go.Scatter(
-                            x=month_labels,
-                            y=year_data['Sales'],
-                            mode='lines+markers',
-                            name=f'{year}' + (' (Partial)' if year == years[-1] else ''),
-                            line=dict(width=2),
-                            marker=dict(size=6)
-                        ))
-                    
-                    fig_historical.update_layout(
-                        title='📊 Historical Sales Comparison by Month',
-                        subtitle='Real sales data only - no predictions',
-                        xaxis_title='Month',
-                        yaxis_title='Total Monthly Sales',
-                        height=400,
-                        hovermode='x unified',
-                        legend=dict(
-                            yanchor="top",
-                            y=0.99,
-                            xanchor="right",
-                            x=0.99
-                        )
-                    )
-                    
-                    # Add subtitle manually since plotly doesn't support it directly
-                    fig_historical.add_annotation(
-                        text="Real sales data only - no predictions",
-                        xref="paper", yref="paper",
-                        x=0.5, y=1.02, xanchor='center', yanchor='bottom',
-                        showarrow=False,
-                        font=dict(size=12, color="gray")
-                    )
-                    
-                    st.plotly_chart(fig_historical, use_container_width=True)
-                    
-                    # Show best and worst performing months historically
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Best performing months
-                        month_performance = yearly_monthly.groupby('MonthNum')['Sales'].mean().sort_values(ascending=False)
-                        best_months = month_performance.head(3)
-                        
-                        st.markdown("**🔝 Best Performing Months (Historical Average):**")
-                        for month_num, avg_sales in best_months.items():
-                            month_name = pd.Timestamp(year=2000, month=month_num, day=1).strftime('%B')
-                            st.text(f"{month_name}: {avg_sales:,.0f}")
-                    
-                    with col2:
-                        # Worst performing months
-                        worst_months = month_performance.tail(3)
-                        
-                        st.markdown("**📉 Lowest Performing Months (Historical Average):**")
-                        for month_num, avg_sales in worst_months.items():
-                            month_name = pd.Timestamp(year=2000, month=month_num, day=1).strftime('%B')
-                            st.text(f"{month_name}: {avg_sales:,.0f}")
-                
-            except Exception as e:
-                st.info("📊 Historical pattern analysis not available - insufficient data")
-                st.write(f"Debug: {str(e)}")
-            
-            # Model performance summary
-            if model_details:
-                st.subheader("🤖 Model Performance Summary")
-                
-                model_usage = {}
-                total_data_points = {}
-                
-                for part_detail in model_details.values():
-                    for model in part_detail.get('models_used', []):
-                        model_usage[model] = model_usage.get(model, 0) + 1
-                        if model not in total_data_points:
-                            total_data_points[model] = []
-                        total_data_points[model].append(part_detail.get('data_points', 0))
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Model Usage Statistics:**")
-                    for model, count in sorted(model_usage.items(), key=lambda x: x[1], reverse=True):
-                        avg_data_points = np.mean(total_data_points[model]) if model in total_data_points else 0
-                        st.text(f"{model}: {count} parts (avg {avg_data_points:.1f} data points)")
-                
-                with col2:
-                    if len(model_usage) > 1:
-                        fig_models = go.Figure(data=[go.Pie(
-                            labels=list(model_usage.keys()),
-                            values=list(model_usage.values()),
-                            hole=0.3
-                        )])
-                        fig_models.update_layout(title="Model Usage Distribution", height=300)
-                        st.plotly_chart(fig_models, use_container_width=True)
-                
-                # Show model comparison if multiple models available
-                if len(all_models) > 1:
-                    st.markdown("**Individual Model Sheet Contents:**")
-                    for model_name in sorted(all_models):
-                        if model_name in model_dfs:
-                            model_total = model_dfs[model_name].iloc[:, 1:].sum().sum()
-                            st.info(f"📊 **{model_name} Sheet**: {len(model_dfs[model_name])} parts, Total Annual: {model_total:,.0f}")
-            
-            # Show sheets that will be created
-            st.subheader("📋 Excel Sheets Preview")
-            sheet_preview = []
-            sheet_preview.append("**Main Forecast** - Best/Ensemble predictions")
-            
-            if model_dfs:
-                for model_name in sorted(all_models):
-                    sheet_preview.append(f"**{model_name}** - Individual {model_name} predictions ({len(model_dfs.get(model_name, []))} parts)")
-            
-            sheet_preview.extend([
-                "**Summary** - Statistics and metadata",
-                "**Model Details** - Processing information per part"
-            ])
-            
-            for sheet_desc in sheet_preview:
-                st.text(f"• {sheet_desc}")
-            
-            # Download Excel file
-            st.subheader("📁 Download Results")
-            
-            # Convert to Excel with multiple sheets
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                # Main forecast sheet (best/ensemble predictions)
-                main_df.to_excel(writer, index=False, sheet_name='Main Forecast')
-                
-                # Individual model prediction sheets
-                if model_dfs:
-                    for model_name, model_df in model_dfs.items():
-                        # Clean sheet name (Excel has limitations on sheet names)
-                        clean_sheet_name = model_name.replace('_', ' ')[:31]  # Excel limit is 31 characters
-                        model_df.to_excel(writer, index=False, sheet_name=clean_sheet_name)
-                
-                # Summary sheet
-                summary_data = {
-                    'Metric': [
-                        'Total Parts Processed',
-                        'Successful Forecasts',
-                        'Fallback Used',
-                        'Success Rate',
-                        'Forecast Period',
-                        'Total Annual Forecast',
-                        'Average Monthly Total',
-                        'Peak Month',
-                        'Adjustment Applied',
-                        'Processing Mode',
-                        'Models Available',
-                        'Generated On'
-                    ],
-                    'Value': [
-                        len(main_df),
-                        successful_forecasts,
-                        failed_forecasts,
-                        f"{success_rate:.1f}%",
-                        f"{forecast_start_date.strftime('%Y-%m')} to {forecast_end_date.strftime('%Y-%m')}",
-                        f"{total_annual_forecast:,.0f}",
-                        f"{avg_monthly_total:,.0f}",
-                        max_month,
-                        f"{adjustment_percentage:+.1f}%",
-                        processing_mode,
-                        ', '.join(sorted(all_models)) if all_models else 'N/A',
-                        datetime.now().strftime('%Y-%m-%d %H:%M')
-                    ]
-                }
-                summary_df = pd.DataFrame(summary_data)
-                summary_df.to_excel(writer, index=False, sheet_name='Summary')
-                
-                # Model details sheet (if not too large)
-                if len(model_details) <= 1000:  # Limit for performance
-                    model_detail_rows = []
-                    for part, details in model_details.items():
-                        model_detail_rows.append({
-                            'Part': part,
-                            'Models_Used': ', '.join(details.get('models_used', [])),
-                            'Data_Points': details.get('data_points', 0),
-                            'Best_Score': min(details.get('scores', {}).values()) if details.get('scores') else 'N/A',
-                            'Processing_Mode': details.get('processing_mode', 'N/A'),
-                            'Error': details.get('error', '')
-                        })
-                    
-                    model_details_df = pd.DataFrame(model_detail_rows)
-                    model_details_df.to_excel(writer, index=False, sheet_name='Model Details')
-            
-            excel_buffer.seek(0)
-            
-            # Download button
-            adj_suffix = f"_adj{adjustment_percentage:+.1f}pct" if adjustment_percentage != 0 else ""
-            mode_suffix = f"_{processing_mode.split()[0].lower()}"
-            filename = f"spare_parts_forecast_{forecast_start_date.strftime('%Y%m')}{adj_suffix}{mode_suffix}.xlsx"
-            
-            st.download_button(
-                label="📥 Download Excel Forecast with Individual Models",
-                data=excel_buffer.getvalue(),
-                file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-            st.success(f"✅ Excel file ready for download: {filename}")
-            
-            # Show file contents info
-            with st.expander("📋 Excel File Contents"):
-                sheet_info = ["**Main Forecast Sheet**", "- Best/Ensemble predictions for each part", "- Column A: Spare Part codes/names", "- Columns B-M: Monthly forecasts for next 12 months", ""]
-                
-                if model_dfs:
-                    sheet_info.extend(["**Individual Model Sheets:**"])
-                    for model_name in sorted(all_models):
-                        sheet_info.append(f"- **{model_name}**: Individual predictions from this model")
-                    sheet_info.append("")
-                
-                sheet_info.extend([
-                    "**Summary Sheet**",
-                    "- Key statistics and metadata",
-                    "- Model performance summary",
-                    "- Generation timestamp",
-                    "",
-                    "**Model Details Sheet** (if ≤1000 parts)",
-                    "- Which models were used for each part",
-                    "- Data quality metrics per part",
-                    "- Processing mode and error information"
-                ])
-                
-                st.markdown("\n".join(sheet_info))
-            
-        except Exception as e:
-            st.error(f"❌ Error in results processing: {str(e)}")
-            st.write("Debug info:", str(e))
-        
-    else:
-        st.error("❌ No forecast results generated")
             
             # Model performance summary
             if model_details:
